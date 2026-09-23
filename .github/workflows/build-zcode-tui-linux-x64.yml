@@ -101,7 +101,6 @@ jobs:
         with:
           name: zcode-linux-x64
           path: |
-            apps/zcode-cli/packages/cli/dist/zcode-linux-x64
             apps/zcode-cli/packages/cli/dist/zcode-linux-x64.tar.gz
             apps/zcode-cli/packages/cli/dist/sha256.txt
           if-no-files-found: error
@@ -113,7 +112,7 @@ jobs:
             echo '## zcode-linux-x64'
             echo
             echo "- commit: ${{ github.sha }}"
-            echo "- Node 底座: $(cat .nvmrc)"
+            echo "- Node 底座: $(tr -d 'v\n' < apps/zcode-cli/.nvmrc)"
             echo
             echo '```'
             cat apps/zcode-cli/packages/cli/dist/sha256.txt
