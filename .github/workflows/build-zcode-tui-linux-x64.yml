@@ -1,0 +1,117 @@
+name: Build zcode TUI binary (linux-x64)
+
+# 产出单个自包含可执行文件 zcode-linux-x64（Node SEA），内置 Node 运行时、
+# TUI 资产、官方插件与 ripgrep/bfs/ugrep，运行端不需要 Node 或 pnpm。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: zcode-tui-linux-x64-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # 桌面端（Electron）不参与 TUI 二进制构建，跳过 Electron 二进制下载以省时间与磁盘。
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+  # CI 是非 TTY 环境，沿用仓库 bootstrap 的做法禁用 husky 安装钩子。
+  HUSKY: "0"
+
+jobs:
+  build:
+    name: zcode-linux-x64
+    # 与目标运行环境（Ubuntu 24.04 x86_64）一致的 glibc 基线。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # 必须与 .nvmrc / mise.toml 一致：SEA 会按 process.versions.node 下载同版本
+          # 官方 Node 二进制当底座，版本不一致时 SEA blob 与底座不匹配。
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 构建 apps/zcode-cli 子 workspace 的全部包（排除 @zcode/cli 自身）。
+      # 必须包含 browser-use-plugin / node-repl-host：它们是随二进制内嵌的官方插件资产，
+      # 不属于 @zcode/cli 的依赖闭包，漏建会让 SEA 资产收集阶段直接失败。
+      - name: Build CLI workspace packages
+        run: pnpm exec turbo --skip-infer --cwd apps/zcode-cli run build --filter=!@zcode/cli --force
+
+      # esbuild 打出 CLI 单文件 bundle：apps/zcode-cli/packages/cli/dist/zcode.cjs
+      - name: Bundle CLI entry
+        run: pnpm --filter @zcode/cli build
+
+      # SEA 的 TUI 资产收集器（sea-tui-assets.mjs）按 package.json 依赖递归收集，会走到
+      # 仓库根包并要求对应 dist/index.js 存在。根包不在上面的 turbo 图内，且 @zcode/shared
+      # 没有 build 脚本，因此必须在这里显式补齐。
+      - name: Build root packages required by SEA asset collection
+        run: |
+          pnpm --filter @zcode/model-option-map build
+          pnpm exec tsc -b packages/shared
+
+      # 只出 linux-x64。不要用 pnpm build:sea：它写死了 --all，会构建全部 6 个平台。
+      - name: Build SEA binary
+        run: node apps/zcode-cli/packages/cli/scripts/build-sea.mjs --target linux-x64
+
+      - name: Smoke test and checksum
+        working-directory: apps/zcode-cli/packages/cli/dist
+        run: |
+          set -euo pipefail
+          bin=zcode-linux-x64
+          test -x "$bin"
+          file "$bin"
+          ZCODE_STORAGE_DIR="$RUNNER_TEMP/zcode-smoke" "./$bin" --version
+          sha256sum "$bin" > sha256.txt
+          # 同时提供 tar.gz：Actions artifact 下载后会重新打包，裸二进制可能丢失可执行位，
+          # 用 tar 解出的文件则保留权限。
+          tar -czf "$bin.tar.gz" "$bin"
+          cat sha256.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zcode-linux-x64
+          path: |
+            apps/zcode-cli/packages/cli/dist/zcode-linux-x64
+            apps/zcode-cli/packages/cli/dist/zcode-linux-x64.tar.gz
+            apps/zcode-cli/packages/cli/dist/sha256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Job summary
+        run: |
+          {
+            echo '## zcode-linux-x64'
+            echo
+            echo "- commit: ${{ github.sha }}"
+            echo "- Node 底座: $(cat .nvmrc)"
+            echo
+            echo '```'
+            cat apps/zcode-cli/packages/cli/dist/sha256.txt
+            echo '```'
+            echo
+            echo '### 本地安装（Ubuntu x86_64，不需要 Node / pnpm）'
+            echo
+            echo '```bash'
+            echo 'tar -xzf zcode-linux-x64.tar.gz'
+            echo 'mkdir -p ~/.local/bin'
+            echo 'install -m 755 zcode-linux-x64 ~/.local/bin/zcode'
+            echo 'command -v zcode || export PATH="$HOME/.local/bin:$PATH"'
+            echo 'zcode --version'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
