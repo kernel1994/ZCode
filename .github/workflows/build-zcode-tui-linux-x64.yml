@@ -38,10 +38,24 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          # 必须与 .nvmrc / mise.toml 一致：SEA 会按 process.versions.node 下载同版本
-          # 官方 Node 二进制当底座，版本不一致时 SEA blob 与底座不匹配。
-          node-version-file: .nvmrc
+          # 必须用 CLI 的精确 pin：根 .nvmrc 只写 `24`（范围），会装到 24.20.0，
+          # 而 Node 底座与许可声明都只认 24.14.0。详见下面 Assert 步骤。
+          node-version-file: apps/zcode-cli/.nvmrc
           cache: pnpm
+
+      # SEA 底座对 Node 版本有三重约束，任一不满足都会在后续步骤才炸，所以前置断言：
+      # ① build-sea 按 process.versions.node 下载同版本官方 Node 二进制当底座；
+      # ② 许可声明只登记在 third-party/runtime/sources.json（当前仅 22.16.0 / 24.14.0），
+      #    缺登记会以 "Missing Node <version> license provenance" 中断构建；
+      # ③ 与 apps/zcode-cli/.nvmrc 不一致时 SEA blob 与底座二进制版本不匹配。
+      - name: Assert Node runtime matches SEA base
+        run: |
+          set -euo pipefail
+          expected=$(tr -d 'v\n' < apps/zcode-cli/.nvmrc)
+          actual=$(node -p 'process.versions.node')
+          echo "node actual=$actual expected=$expected"
+          test "$actual" = "$expected"
+          test -f "third-party/runtime/node-$actual-LICENSE.txt"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
